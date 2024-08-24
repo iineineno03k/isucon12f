@@ -10,6 +10,8 @@ require (
 	github.com/pkg/errors v0.9.1
 )
 
+require golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
+
 require (
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/labstack/gommon v0.3.1 // indirect

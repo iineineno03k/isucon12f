@@ -13,10 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/exp/slices"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
