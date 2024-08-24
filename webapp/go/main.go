@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/exp/slices"
 
-	"github.com/bwmarrin/snowflake"
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -44,7 +44,6 @@ var (
 	ErrForbidden                error = fmt.Errorf("forbidden")
 	ErrGeneratePassword         error = fmt.Errorf("failed to password hash") //nolint:deadcode
 	historyPresentsCache        *cache.Cache
-	node                        *snowflake.Node
 )
 
 const (
@@ -646,13 +645,6 @@ func (h *Handler) obtainItem(tx *sqlx.Tx, userID, itemID int64, itemType int, ob
 // POST /initialize
 func initialize(c echo.Context) error {
 	historyPresentsCache = cache.New(5*time.Minute, 10*time.Minute)
-	id, _ := strconv.ParseInt("1", 10, 64)
-	var err error
-	node, err = snowflake.NewNode(id)
-	if err != nil {
-		panic(err)
-	}
-
 	dbx, err := connectDB(true)
 	if err != nil {
 		return errorResponse(c, http.StatusInternalServerError, err)
@@ -1896,7 +1888,25 @@ func noContentResponse(c echo.Context, status int) error {
 
 // generateID ユニークなIDを生成する
 func (h *Handler) generateID() (int64, error) {
-	return node.Generate().Int64(), nil
+	var updateErr error
+	for i := 0; i < 100; i++ {
+		res, err := h.DB.Exec("UPDATE id_generator SET id=LAST_INSERT_ID(id+1)")
+		if err != nil {
+			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 {
+				updateErr = err
+				continue
+			}
+			return 0, err
+		}
+
+		id, err := res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+
+	return 0, fmt.Errorf("failed to generate id: %w", updateErr)
 }
 
 // generateUUID UUIDの生成
