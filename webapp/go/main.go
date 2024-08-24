@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -21,6 +23,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 )
 
@@ -39,6 +42,7 @@ var (
 	ErrUnauthorized             error = fmt.Errorf("unauthorized user")
 	ErrForbidden                error = fmt.Errorf("forbidden")
 	ErrGeneratePassword         error = fmt.Errorf("failed to password hash") //nolint:deadcode
+	historyPresentsCache        *cache.Cache
 )
 
 const (
@@ -435,6 +439,14 @@ func (h *Handler) obtainLoginBonus(tx *sqlx.Tx, userID int64, requestAt int64) (
 	return sendLoginBonuses, nil
 }
 
+func getNormalPresentsFromCache(userID int64) []int64 {
+	val, found := historyPresentsCache.Get(strconv.FormatInt(userID, 10))
+	if !found {
+		return make([]int64, 0)
+	}
+	return val.([]int64)
+}
+
 // obtainPresent プレゼント付与
 func (h *Handler) obtainPresent(tx *sqlx.Tx, userID int64, requestAt int64) ([]*UserPresent, error) {
 	normalPresents := make([]*PresentAllMaster, 0)
@@ -443,68 +455,96 @@ func (h *Handler) obtainPresent(tx *sqlx.Tx, userID int64, requestAt int64) ([]*
 		return nil, err
 	}
 
-	obtainPresents := make([]*UserPresent, 0)
-	for _, np := range normalPresents {
-		received := new(UserPresentAllReceivedHistory)
-		query = "SELECT * FROM user_present_all_received_history WHERE user_id=? AND present_all_id=?"
-		err := tx.Get(received, query, userID, np.ID)
-		if err == nil {
-			// プレゼント配布済
-			continue
+	if len(normalPresents) > 0 {
+		// IDリストを抽出
+		var ids []int64
+		historyPresents := getNormalPresentsFromCache(userID)
+		for _, np := range normalPresents {
+			//npのIDがキャッシュに含まれているか確認。
+			if slices.Contains(historyPresents, np.ID) {
+				//プレゼント配布済み
+				continue
+			}
+			ids = append(ids, np.ID)
 		}
-		if err != sql.ErrNoRows {
-			return nil, err
+		//全てキャッシュに入ってたら配布したプレゼントなし。
+		if len(ids) == 0 {
+			return make([]*UserPresent, 0), nil
 		}
 
-		pID, err := h.generateID()
+		// SQLクエリを生成
+		query, args, err := sqlx.In("SELECT present_all_id FROM user_present_all_received_history WHERE user_id = ? AND present_all_id IN (?)", userID, ids)
 		if err != nil {
 			return nil, err
 		}
-		up := &UserPresent{
-			ID:             pID,
-			UserID:         userID,
-			SentAt:         requestAt,
-			ItemType:       np.ItemType,
-			ItemID:         np.ItemID,
-			Amount:         int(np.Amount),
-			PresentMessage: np.PresentMessage,
-			CreatedAt:      requestAt,
-			UpdatedAt:      requestAt,
-		}
-		query = "INSERT INTO user_presents(id, user_id, sent_at, item_type, item_id, amount, present_message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-		if _, err := tx.Exec(query, up.ID, up.UserID, up.SentAt, up.ItemType, up.ItemID, up.Amount, up.PresentMessage, up.CreatedAt, up.UpdatedAt); err != nil {
-			return nil, err
-		}
+		query = tx.Rebind(query)
 
-		phID, err := h.generateID()
+		// 結果を取得
+		var received []int64
+		err = tx.Select(&received, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		history := &UserPresentAllReceivedHistory{
-			ID:           phID,
-			UserID:       userID,
-			PresentAllID: np.ID,
-			ReceivedAt:   requestAt,
-			CreatedAt:    requestAt,
-			UpdatedAt:    requestAt,
-		}
-		query = "INSERT INTO user_present_all_received_history(id, user_id, present_all_id, received_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-		if _, err := tx.Exec(
-			query,
-			history.ID,
-			history.UserID,
-			history.PresentAllID,
-			history.ReceivedAt,
-			history.CreatedAt,
-			history.UpdatedAt,
-		); err != nil {
-			return nil, err
+		//配布済みアイテムIDをキャッシュ候補にする。
+		historyPresents = append(historyPresents, received...)
+
+		historyPresentMap := make(map[int64]bool)
+		for _, id := range historyPresents {
+			historyPresentMap[id] = true
 		}
 
-		obtainPresents = append(obtainPresents, up)
+		// historyPresentMap にない要素だけを新しいスライスに追加
+		obtainPresents := make([]*UserPresent, 0)
+		valueStrings := make([]string, 0)
+		valueArgs := make([]interface{}, 0)
+		for _, np := range normalPresents {
+			if !historyPresentMap[np.ID] {
+				//TODO: generateID修正する
+				pID, err := h.generateID()
+				if err != nil {
+					return nil, err
+				}
+				up := &UserPresent{
+					ID:             pID,
+					UserID:         userID,
+					SentAt:         requestAt,
+					ItemType:       np.ItemType,
+					ItemID:         np.ItemID,
+					Amount:         int(np.Amount),
+					PresentMessage: np.PresentMessage,
+					CreatedAt:      requestAt,
+					UpdatedAt:      requestAt,
+				}
+				obtainPresents = append(obtainPresents, up)
+				//配布されるプレゼントをキャッシュに含める。
+				historyPresents = append(historyPresents, np.ID)
+
+				valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+				valueArgs = append(valueArgs, up.ID)
+				valueArgs = append(valueArgs, up.UserID)
+				valueArgs = append(valueArgs, up.SentAt)
+				valueArgs = append(valueArgs, up.ItemType)
+				valueArgs = append(valueArgs, up.ItemID)
+				valueArgs = append(valueArgs, up.Amount)
+				valueArgs = append(valueArgs, up.PresentMessage)
+				valueArgs = append(valueArgs, up.CreatedAt)
+				valueArgs = append(valueArgs, up.UpdatedAt)
+			}
+		}
+
+		// クエリを組み立てる
+		query = fmt.Sprintf("INSERT INTO user_presents (id, user_id, sent_at, item_type, item_id, amount, present_message, created_at, updated_at) VALUES %s",
+			strings.Join(valueStrings, ","))
+		if _, err := tx.Exec(query, valueArgs...); err != nil {
+			return nil, err
+		}
+		//配布済みプレゼントをキャッシュに入れる。
+		historyPresentsCache.Set(strconv.FormatInt(userID, 10), historyPresents, cache.DefaultExpiration)
+		return obtainPresents, nil
 	}
 
-	return obtainPresents, nil
+	//配布対象のプレゼントがマスタにない場合
+	return make([]*UserPresent, 0), nil
 }
 
 // obtainItem アイテム付与処理
@@ -620,6 +660,7 @@ func (h *Handler) obtainItem(tx *sqlx.Tx, userID, itemID int64, itemType int, ob
 // initialize 初期化処理
 // POST /initialize
 func initialize(c echo.Context) error {
+	historyPresentsCache = cache.New(5*time.Minute, 10*time.Minute)
 	dbx, err := connectDB(true)
 	if err != nil {
 		return errorResponse(c, http.StatusInternalServerError, err)
