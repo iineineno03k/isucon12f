@@ -461,32 +461,25 @@ func (h *Handler) obtainPresent(tx *sqlx.Tx, userID int64, requestAt int64) ([]*
 		var ids []int64
 		historyPresents := getNormalPresentsFromCache(userID)
 		for _, np := range normalPresents {
-			//npのIDがキャッシュに含まれているか確認。
-			if slices.Contains(historyPresents, np.ID) {
-				//プレゼント配布済み
-				continue
+			if !slices.Contains(historyPresents, np.ID) {
+				ids = append(ids, np.ID)
 			}
-			ids = append(ids, np.ID)
 		}
-		//全てキャッシュに入ってたら配布したプレゼントなし。
 		if len(ids) == 0 {
-			return make([]*UserPresent, 0), nil
+			return []*UserPresent{}, nil
 		}
 
-		// SQLクエリを生成
 		query, args, err := sqlx.In("SELECT present_all_id FROM user_present_all_received_history WHERE user_id = ? AND present_all_id IN (?)", userID, ids)
 		if err != nil {
 			return nil, err
 		}
 		query = tx.Rebind(query)
 
-		// 結果を取得
 		var received []int64
 		err = tx.Select(&received, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		//配布済みアイテムIDをキャッシュ候補にする。
 		historyPresents = append(historyPresents, received...)
 
 		historyPresentMap := make(map[int64]bool)
@@ -494,13 +487,11 @@ func (h *Handler) obtainPresent(tx *sqlx.Tx, userID int64, requestAt int64) ([]*
 			historyPresentMap[id] = true
 		}
 
-		// historyPresentMap にない要素だけを新しいスライスに追加
 		obtainPresents := make([]*UserPresent, 0)
 		valueStrings := make([]string, 0)
 		valueArgs := make([]interface{}, 0)
 		for _, np := range normalPresents {
 			if !historyPresentMap[np.ID] {
-				//TODO: generateID修正する
 				pID, err := h.generateID()
 				if err != nil {
 					return nil, err
@@ -517,35 +508,27 @@ func (h *Handler) obtainPresent(tx *sqlx.Tx, userID int64, requestAt int64) ([]*
 					UpdatedAt:      requestAt,
 				}
 				obtainPresents = append(obtainPresents, up)
-				//配布されるプレゼントをキャッシュに含める。
 				historyPresents = append(historyPresents, np.ID)
 
 				valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
-				valueArgs = append(valueArgs, up.ID)
-				valueArgs = append(valueArgs, up.UserID)
-				valueArgs = append(valueArgs, up.SentAt)
-				valueArgs = append(valueArgs, up.ItemType)
-				valueArgs = append(valueArgs, up.ItemID)
-				valueArgs = append(valueArgs, up.Amount)
-				valueArgs = append(valueArgs, up.PresentMessage)
-				valueArgs = append(valueArgs, up.CreatedAt)
-				valueArgs = append(valueArgs, up.UpdatedAt)
+				for _, v := range []interface{}{up.ID, up.UserID, up.SentAt, up.ItemType, up.ItemID, up.Amount, up.PresentMessage, up.CreatedAt, up.UpdatedAt} {
+					valueArgs = append(valueArgs, v)
+				}
 			}
 		}
 
-		// クエリを組み立てる
-		query = fmt.Sprintf("INSERT INTO user_presents (id, user_id, sent_at, item_type, item_id, amount, present_message, created_at, updated_at) VALUES %s",
-			strings.Join(valueStrings, ","))
-		if _, err := tx.Exec(query, valueArgs...); err != nil {
-			return nil, err
+		if len(valueStrings) > 0 {
+			query = fmt.Sprintf("INSERT INTO user_presents (id, user_id, sent_at, item_type, item_id, amount, present_message, created_at, updated_at) VALUES %s",
+				strings.Join(valueStrings, ","))
+			if _, err := tx.Exec(query, valueArgs...); err != nil {
+				return nil, err
+			}
 		}
-		//配布済みプレゼントをキャッシュに入れる。
 		historyPresentsCache.Set(strconv.FormatInt(userID, 10), historyPresents, cache.DefaultExpiration)
 		return obtainPresents, nil
 	}
 
-	//配布対象のプレゼントがマスタにない場合
-	return make([]*UserPresent, 0), nil
+	return []*UserPresent{}, nil
 }
 
 // obtainItem アイテム付与処理
