@@ -642,7 +642,9 @@ func (h *Handler) obtainItem(tx *sqlx.Tx, userID, itemID int64, itemType int, ob
 	return obtainCoins, obtainCards, obtainItems, nil
 }
 
-func init() {
+// initialize 初期化処理
+// POST /initialize
+func initialize(c echo.Context) error {
 	historyPresentsCache = cache.New(5*time.Minute, 10*time.Minute)
 	id, _ := strconv.ParseInt("1", 10, 64)
 	var err error
@@ -650,11 +652,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-}
 
-// initialize 初期化処理
-// POST /initialize
-func initialize(c echo.Context) error {
 	dbx, err := connectDB(true)
 	if err != nil {
 		return errorResponse(c, http.StatusInternalServerError, err)
