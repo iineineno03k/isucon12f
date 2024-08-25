@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/exp/slices"
 
-	"github.com/bwmarrin/snowflake"
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
@@ -54,8 +54,7 @@ const (
 )
 
 type Handler struct {
-	DB            *sqlx.DB
-	snowflakeNode *snowflake.Node
+	DB *sqlx.DB
 }
 
 func main() {
@@ -78,16 +77,6 @@ func main() {
 		AllowHeaders: []string{"Content-Type", "x-master-version", "x-session"},
 	}))
 
-	// Snowflake
-	var nodeId int64
-	if n, err := strconv.ParseInt("1", 10, 64); err == nil {
-		nodeId = n
-	}
-	snowflakeNode, err := snowflake.NewNode(nodeId)
-	if err != nil {
-		panic(err)
-	}
-
 	dbx, err := connectDB(false)
 	if err != nil {
 		e.Logger.Fatalf("failed to connect to db: %v", err)
@@ -96,8 +85,7 @@ func main() {
 
 	e.Server.Addr = fmt.Sprintf(":%v", "8080")
 	h := &Handler{
-		DB:            dbx,
-		snowflakeNode: snowflakeNode,
+		DB: dbx,
 	}
 
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{}))
@@ -1898,9 +1886,27 @@ func noContentResponse(c echo.Context, status int) error {
 	return c.NoContent(status)
 }
 
-// generateID uniqueなIDを生成する
+// generateID ユニークなIDを生成する
 func (h *Handler) generateID() (int64, error) {
-	return h.snowflakeNode.Generate().Int64(), nil
+	var updateErr error
+	for i := 0; i < 100; i++ {
+		res, err := h.DB.Exec("UPDATE id_generator SET id=LAST_INSERT_ID(id+1)")
+		if err != nil {
+			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 {
+				updateErr = err
+				continue
+			}
+			return 0, err
+		}
+
+		id, err := res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+
+	return 0, fmt.Errorf("failed to generate id: %w", updateErr)
 }
 
 // generateUUID UUIDの生成
